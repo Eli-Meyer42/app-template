@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EDEFEE">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>App</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#EDEFEE; --surface:#FAFBFA; --ink:#2A3034; --soft:#687279; --faint:#9BA4A9;
+    --line:#E0E4E3; --hair:#EAEEEC; --warn:#A8603C; --accent:#4F7088; --tile:#F4F6F5;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;}
+  body{background:var(--bg);color:var(--ink);font-family:'Outfit',system-ui,-apple-system,sans-serif;
+    font-size:16px;line-height:1.4;padding-bottom:60px;}
+  h1,h2{font-weight:600;margin:0;letter-spacing:-.02em;}
+  .wrap{max-width:660px;margin:0 auto;padding:0 14px;}
+
+  header{position:sticky;top:0;z-index:40;background:var(--bg);padding:14px 0 10px;
+    box-shadow:0 6px 10px -8px rgba(42,48,52,.22);}
+  .top{display:flex;align-items:center;gap:8px;padding:0 2px;}
+  h1{font-size:25px;flex:1;}
+  .icon{width:38px;height:38px;border:none;background:none;border-radius:50%;display:grid;
+    place-items:center;color:var(--soft);cursor:pointer;flex:none;}
+  .icon:hover{background:var(--surface);}
+  .icon svg{width:21px;height:21px;}
+
+  .card{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px;}
+  .card h2{font-size:18px;margin-bottom:6px;}
+  .card p{margin:0;color:var(--soft);font-size:15px;}
+  code{background:var(--tile);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px;}
+
+  input,textarea,.btn{font:inherit;font-size:16px;border:1px solid var(--line);border-radius:12px;
+    padding:12px 13px;background:var(--surface);color:var(--ink);}
+  .btn{cursor:pointer;font-weight:600;}
+  .primary{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .btn.arm{background:var(--warn);border-color:var(--warn);color:#fff;}
+  .foot{margin-top:16px;font-size:13px;color:var(--faint);text-align:center;min-height:18px;}
+
+  .scrim{position:fixed;inset:0;background:rgba(42,48,52,.34);z-index:60;opacity:0;pointer-events:none;transition:opacity .2s;}
+  .scrim.on{opacity:1;pointer-events:auto;}
+  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:70;background:var(--surface);
+    border-radius:24px 24px 0 0;padding:16px 16px calc(20px + env(safe-area-inset-bottom));
+    transform:translateY(102%);transition:transform .24s cubic-bezier(.32,.72,0,1);
+    max-height:88vh;overflow-y:auto;max-width:660px;margin:0 auto;}
+  .sheet.on{transform:translateY(0);}
+  .grab{width:38px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 12px;}
+  .sheet h3{font-size:18px;margin:0 0 4px;}
+  .sheet p{margin:0 0 12px;color:var(--soft);font-size:14px;}
+  .lab{font-size:11.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);margin:16px 0 7px;}
+  .stack{display:flex;flex-direction:column;gap:8px;}
+  .stack .btn{width:100%;text-align:center;}
+  .linkbtn{display:block;text-align:center;text-decoration:none;color:var(--ink);}
+  .syncrow{display:flex;align-items:center;gap:9px;font-size:14.5px;color:var(--soft);padding:2px 2px 4px;}
+  .syncdot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--faint);}
+  .syncdot.live{background:#3E8F63;}
+  .syncdot.saving{background:#C9A227;}
+  .syncdot.error{background:var(--warn);}
+  .buildstamp{text-align:center;font-size:12px;color:var(--faint);margin:22px 0 2px;}
+  :focus-visible{outline:2.5px solid var(--ink);outline-offset:2px;}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="top">
+      <h1 id="apptitle">App</h1>
+      <button class="icon" id="gear" aria-label="Settings">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" id="main"></main>
+
+<div class="wrap"><p class="foot" id="foot"></p></div>
+
+<div class="scrim" id="scrim"></div>
+
+<div class="sheet" id="sheet-set" role="dialog" aria-modal="true">
+  <div class="grab"></div>
+  <h3>Settings</h3>
+
+  <div class="lab">Sync</div>
+  <div class="syncrow"><span class="syncdot" id="syncdot"></span><span id="syncword">Not connected</span></div>
+
+  <div class="lab">Backup</div>
+  <div class="stack">
+    <button class="btn" id="exp">Export backup file</button>
+    <button class="btn" id="imp">Restore from backup</button>
+    <input type="file" id="imp-file" accept=".json" style="display:none">
+  </div>
+
+  <div class="lab">Activity log</div>
+  <p style="margin-bottom:9px" id="logcount">No activity recorded yet.</p>
+  <div class="stack">
+    <button class="btn" id="exp-log">Export activity log</button>
+    <button class="btn" id="clr-log">Clear the log</button>
+  </div>
+
+  <div class="lab">Start over</div>
+  <p style="margin-bottom:9px">Wipes this app's data on every device.</p>
+  <div class="stack"><button class="btn" id="wipe">Clear everything</button></div>
+
+  <div class="lab">Links</div>
+  <div class="stack" id="links"></div>
+
+  <p class="buildstamp" id="build">Build 1</p>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-database-compat.js"></script>
+<script>
+/* ============================================================
+   APP CONFIG — the only block most new apps need to change.
+   ============================================================ */
+const APP={
+  title:   'App',                 // shown in the header
+  key:     'app-v1',              // local storage key, unique per app
+  dbPath:  'app/main',            // Firebase branch, unique per app
+  build:   'Build 1 · 20 Nov 2026',
+  links:[                         // shown in settings
+    // {label:'GitHub repository', url:'https://github.com/Eli-Meyer42/…'},
+    // {label:'Netlify deploys',   url:'https://app.netlify.com/projects/…/deploys'},
+    {label:'Stored data', url:'https://console.firebase.google.com/project/shopping-eb9b3/database/shopping-eb9b3-default-rtdb/data'}
+  ]
+};
+const FIREBASE={
+  apiKey:"AIzaSyA_sup5TXeBfZ8Le366DMqmhDxJbegJaCA",
+  authDomain:"shopping-eb9b3.firebaseapp.com",
+  databaseURL:"https://shopping-eb9b3-default-rtdb.firebaseio.com",
+  projectId:"shopping-eb9b3",
+  storageBucket:"shopping-eb9b3.firebasestorage.app",
+  messagingSenderId:"333207859905",
+  appId:"1:333207859905:web:bf9e234cf6ce50fa3b5a40"
+};
+
+/* ============================================================
+   APP STATE — put the app's own data in here.
+   Anything on `data` is saved locally and synced automatically.
+   ============================================================ */
+let data={ items:[] };
+
+/* Called whenever the state changes. Replace this with the real UI. */
+function draw(){
+  $('main').innerHTML=
+    '<div class="card"><h2>Ready</h2>'+
+    '<p>Storage, sync, backup and the activity log are wired up. '+
+    'Put the app’s state in <code>data</code>, call <code>save()</code> when it changes, '+
+    'and build the interface in <code>draw()</code>.</p></div>';
+  $('foot').textContent='';
+}
+
+/* ============================================================
+   PLUMBING — rarely needs changing.
+   ============================================================ */
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---- storage: localStorage, then IndexedDB, then memory ---- */
+const STORE=(()=>{
+  const mem={};
+  const hasLS=(()=>{try{localStorage.setItem('__t','1');localStorage.removeItem('__t');return true;}catch(e){return false;}})();
+  const open=()=>new Promise((res,rej)=>{const r=indexedDB.open('app-db',1);
+    r.onupgradeneeded=()=>r.result.createObjectStore('kv');
+    r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);});
+  const idbSet=(k,v)=>open().then(d=>new Promise((res,rej)=>{
+    const t=d.transaction('kv','readwrite'); t.objectStore('kv').put(v,k);
+    t.oncomplete=()=>res(true); t.onerror=()=>rej(t.error);}));
+  const idbGet=k=>open().then(d=>new Promise((res,rej)=>{
+    const t=d.transaction('kv','readonly'); const q=t.objectStore('kv').get(k);
+    q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error);}));
+  return {
+    async get(k){
+      if(hasLS){try{const v=localStorage.getItem(k); if(v!=null) return v;}catch(e){}}
+      try{const v=await idbGet(k); if(v!=null) return v;}catch(e){}
+      return mem[k]||null;
+    },
+    async set(k,v){
+      let ok=false; mem[k]=v;
+      if(hasLS){try{localStorage.setItem(k,v); ok=true;}catch(e){}}
+      try{ await idbSet(k,v); ok=true; }catch(e){}
+      return ok;
+    }
+  };
+})();
+
+/* ---- activity log (local only, never synced) ---- */
+const LOG_KEY=APP.key+'-log', LOG_MAX=600;
+let actlog=[];
+function log(kind,detail){
+  actlog.push({t:Date.now(),k:kind,d:detail===undefined?'':String(detail)});
+  if(actlog.length>LOG_MAX) actlog=actlog.slice(-LOG_MAX);
+  try{ STORE.set(LOG_KEY,JSON.stringify(actlog)); }catch(e){}
+}
+function logText(){
+  const p=n=>String(n).padStart(2,'0');
+  const stamp=t=>{const d=new Date(t);
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());};
+  return [APP.title+' — activity log','exported: '+stamp(Date.now()),'build: '+APP.build,
+    'entries: '+actlog.length,'agent: '+navigator.userAgent,''.padEnd(60,'-'),''].join('\n')
+    +actlog.map(e=>stamp(e.t)+'  '+e.k.padEnd(14)+'  '+e.d).join('\n')+'\n';
+}
+
+/* ---- save / load ---- */
+let rev=0, saveWarned=false;
+function snap(){ return Object.assign({},data,{rev:rev}); }
+function applyState(d){
+  if(!d) return false;
+  const {rev:r}=d; rev=r||0;
+  const copy=Object.assign({},d); delete copy.rev;
+  data=copy; return true;
+}
+async function save(){
+  rev=Date.now();
+  const ok=await STORE.set(APP.key,JSON.stringify(snap()));
+  cloudPush();
+  if(!ok&&!saveWarned){ saveWarned=true; flash('This browser won’t let the app save. Use Export backup before closing.'); }
+  return ok;
+}
+async function load(){
+  try{ const raw=await STORE.get(APP.key); if(raw) applyState(JSON.parse(raw)); }catch(e){}
+  try{ const r=await STORE.get(LOG_KEY); if(r) actlog=JSON.parse(r)||[]; }catch(e){}
+  $('apptitle').textContent=APP.title;
+  document.title=APP.title;
+  $('build').textContent=APP.build;
+  drawLinks();
+  cloudStart();
+  draw();
+}
+
+/* ---- cloud sync ---- */
+let cloudRef=null, cloudSeen=0, pushT=null;
+function cloudSay(s){
+  const d=$('syncdot'), t=$('syncword');
+  const label={live:'Synced',saving:'Saving…',offline:'Offline — will sync later',
+    off:'Not connected',error:'Sync error'}[s]||s;
+  if(d) d.className='syncdot '+s;
+  if(t) t.textContent=label;
+}
+function cloudStart(){
+  try{
+    if(typeof firebase==='undefined'){ cloudSay('off'); return; }
+    firebase.initializeApp(FIREBASE);
+    cloudRef=firebase.database().ref(APP.dbPath);
+    firebase.database().ref('.info/connected').on('value',s=>cloudSay(s.val()===true?'live':'offline'));
+    cloudRef.on('value',s=>{
+      const d=s.val();
+      if(!d){ cloudPush(); return; }
+      if(d.rev===cloudSeen) return;
+      if((d.rev||0)<=rev) return;
+      cloudSeen=d.rev||0;
+      log('cloud-in','adopted remote state');
+      if(applyState(d)){ STORE.set(APP.key,JSON.stringify(snap())); draw(); flash('Updated from your other device.'); }
+    },err=>{ cloudSay('error'); console.warn('cloud read failed:',err&&err.message); });
+  }catch(e){ cloudSay('error'); console.warn('cloud init failed:',e&&e.message); }
+}
+function cloudPush(){
+  if(!cloudRef) return;
+  clearTimeout(pushT);
+  pushT=setTimeout(()=>{
+    const d=snap(); cloudSeen=d.rev; cloudSay('saving');
+    cloudRef.set(d).then(()=>cloudSay('live'))
+      .catch(e=>{ cloudSay('error'); console.warn('cloud write failed:',e&&e.message); });
+  },400);
+}
+
+/* ---- settings ---- */
+let flashT;
+function flash(m){ $('foot').textContent=m; clearTimeout(flashT); flashT=setTimeout(()=>{$('foot').textContent='';},6000); }
+function drawLinks(){
+  const box=$('links'); box.innerHTML='';
+  APP.links.forEach(l=>{
+    const a=document.createElement('a');
+    a.className='btn linkbtn'; a.target='_blank'; a.rel='noopener';
+    a.href=l.url; a.textContent=l.label;
+    box.appendChild(a);
+  });
+  $('logcount').textContent=actlog.length
+    ? actlog.length+' entries recorded.' : 'No activity recorded yet.';
+}
+function show(id){ $('scrim').classList.add('on'); $(id).classList.add('on'); }
+function closeSheets(){ ['sheet-set'].forEach(i=>$(i).classList.remove('on')); $('scrim').classList.remove('on'); }
+$('scrim').addEventListener('click',closeSheets);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheets(); });
+$('gear').addEventListener('click',()=>{ drawLinks(); wipeDisarm(); show('sheet-set'); });
+
+function download(name,text,type){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type:type||'text/plain'}));
+  a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+$('exp').addEventListener('click',()=>{
+  download(APP.key+'-backup.json',JSON.stringify(snap(),null,1),'application/json');
+  flash('Backup exported.');
+});
+$('imp').addEventListener('click',()=>$('imp-file').click());
+$('imp-file').addEventListener('change',e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{ try{
+    if(!applyState(JSON.parse(r.result))) throw 0;
+    draw(); save(); closeSheets(); flash('Backup restored.');
+  }catch(err){ flash('That file could not be read.'); } };
+  r.readAsText(f); e.target.value='';
+});
+$('exp-log').addEventListener('click',()=>{
+  if(!actlog.length){ flash('Nothing in the log yet.'); return; }
+  download(APP.key+'-log.txt',logText());
+  flash('Log exported — '+actlog.length+' entries.');
+});
+$('clr-log').addEventListener('click',()=>{
+  actlog=[]; try{ STORE.set(LOG_KEY,'[]'); }catch(e){}
+  drawLinks(); flash('Activity log cleared.');
+});
+
+let wipeArmed=false, wipeT;
+function wipeDisarm(){ wipeArmed=false; clearTimeout(wipeT);
+  const b=$('wipe'); if(b){ b.classList.remove('arm'); b.textContent='Clear everything'; } }
+$('wipe').addEventListener('click',()=>{
+  if(!wipeArmed){ wipeArmed=true; const b=$('wipe');
+    b.classList.add('arm'); b.textContent='Erase all data? Tap again';
+    clearTimeout(wipeT); wipeT=setTimeout(wipeDisarm,5000); return; }
+  data={items:[]}; wipeDisarm(); draw(); save(); closeSheets(); log('wipe','all data cleared'); flash('Everything cleared.');
+});
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+
+load();
+</script>
+</body>
+</html>
