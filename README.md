@@ -23,23 +23,34 @@ Click **Use this template** at the top of this repo to start a new app from it.
    - `key` — local storage key, must be unique per app
    - `dbPath` — the Firebase branch, must be unique per app (`workout/main`)
    - `build` — bump on every deploy
-   - `links` — the repo and Netlify links for the settings sheet
+   - `links` — the repo and deploy-history links for the settings sheet
+   Then change `APP_ID` at the top of `sw.js` to the app's name, lowercase,
+   and the names in `manifest.webmanifest`.
 3. Add the app's state to `data` and build the interface in `draw()`.
    Call `save()` whenever something changes; it stores locally and syncs.
-4. Add the new `dbPath` to the Firebase rules, then Publish:
-   ```json
-   { "rules": {
-     "lists":   { "main": { ".read": true, ".write": true } },
-     "workout": { "main": { ".read": true, ".write": true } }
-   } }
-   ```
-5. **app.netlify.com** → **Add new site** → **Import an existing project** →
-   **GitHub** → pick the repo → build command blank, publish directory blank → **Deploy**.
+   Call `log(kind, detail)` for every decision the app makes, and fill in
+   `where()` and `appSummary()` so the activity log knows the app.
+4. Add the new `dbPath` to the Firebase rules, keeping every app already
+   listed there, then Publish.
+5. The repo → **Settings** → **Pages** → **Deploy from a branch** → **main**,
+   **/ (root)** → **Save**. The app is then at
+   `https://eli-meyer42.github.io/<repo>/`, and every push redeploys it.
+
+## Activity log
+
+Built in. It records every tap, typing, sessions, sync and errors, plus
+whatever the app logs itself, and sends it to the private repo
+`Eli-Meyer42/shopping-logs` under `<app>/logs/<device>/` whenever the app is
+left. It needs one GitHub token per device; a device that already has one
+from another of these apps needs nothing.
 
 ## Rules worth keeping
 
-- **Keep the repo public.** Netlify's free plan refuses to build commits from
-  unrecognised contributors on private repos.
+- **Keep the repo public.** GitHub Pages on a private repo needs a paid plan.
+- **Keep every path relative** (`./`) in the manifest and service worker.
+  Pages serves each app from its own subfolder.
+- **Give the service worker its own `APP_ID`.** Every app on the site shares
+  one cache store, and a worker only clears caches that start with its id.
 - **Never use `window.storage`.** It only exists inside Claude's preview; in a
   real deployment it fails silently and the app forgets everything.
 - **Bump the build stamp every push.** It is the quickest way to confirm a

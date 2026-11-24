@@ -104,10 +104,17 @@
 
   <div class="lab">Activity log</div>
   <p style="margin-bottom:9px" id="logcount">No activity recorded yet.</p>
+  <p style="margin-bottom:9px" id="ghstate">Not sending yet.</p>
   <div class="stack">
+    <button class="btn" id="send-log">Send log now</button>
     <button class="btn" id="exp-log">Export activity log</button>
     <button class="btn" id="clr-log">Clear the log</button>
   </div>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <input id="gh-token" type="password" placeholder="Paste a GitHub token" autocomplete="off" aria-label="GitHub token" style="flex:1;min-width:0">
+    <button class="btn" id="gh-save">Save</button>
+  </div>
+  <p style="margin-top:8px">Only needed once per device. If another of your apps already has a token on this device, this app uses that one.</p>
 
   <div class="lab">Start over</div>
   <p style="margin-bottom:9px">Wipes this app's data on every device.</p>
@@ -129,10 +136,10 @@ const APP={
   title:   'App',                 // shown in the header
   key:     'app-v1',              // local storage key, unique per app
   dbPath:  'app/main',            // Firebase branch, unique per app
-  build:   'Build 1 · 20 Nov 2026',
+  build:   'Build 1 · 24 Nov 2026',
   links:[                         // shown in settings
     // {label:'GitHub repository', url:'https://github.com/Eli-Meyer42/…'},
-    // {label:'Netlify deploys',   url:'https://app.netlify.com/projects/…/deploys'},
+    // {label:'Deploy history',    url:'https://github.com/Eli-Meyer42/…/deployments'},
     {label:'Stored data', url:'https://console.firebase.google.com/project/shopping-eb9b3/database/shopping-eb9b3-default-rtdb/data'}
   ]
 };
@@ -156,7 +163,7 @@ let data={ items:[] };
 function draw(){
   $('main').innerHTML=
     '<div class="card"><h2>Ready</h2>'+
-    '<p>Storage, sync, backup and the activity log are wired up. '+
+    '<p>Storage, sync, backup and the full activity log are wired up. '+
     'Put the app’s state in <code>data</code>, call <code>save()</code> when it changes, '+
     'and build the interface in <code>draw()</code>.</p></div>';
   $('foot').textContent='';
@@ -196,22 +203,183 @@ const STORE=(()=>{
   };
 })();
 
-/* ---- activity log (local only, never synced) ---- */
-const LOG_KEY=APP.key+'-log', LOG_MAX=600;
-let actlog=[];
-function log(kind,detail){
-  actlog.push({t:Date.now(),k:kind,d:detail===undefined?'':String(detail)});
-  if(actlog.length>LOG_MAX) actlog=actlog.slice(-LOG_MAX);
-  try{ STORE.set(LOG_KEY,JSON.stringify(actlog)); }catch(e){}
+/* ---- activity log ----
+   Records everything: every tap, what the app did about it, typing, sessions,
+   sync, and anything that breaks. Never part of the synced state. Stored
+   packed, and every entry has a number that only goes up, so a gap proves
+   something is missing.
+
+   In the app's own code, call log(kind, detail) for every decision it makes,
+   with the reason. Two hooks make the log specific to the app:
+     where()      — a short tag for what is on screen, added to every tap
+     appSummary() — one line describing the data, added when the app opens */
+function where(){ return ''; }                 // e.g. '  [list/today]'
+function appSummary(){ return ''; }            // e.g. '12 items, 3 done'
+
+const LOG_KEY=APP.key+'-log', DEV_KEY=APP.key+'-dev', LOG_MAX=12000;
+let actlog=[], logT=null, devId='', logBase=0;
+const packLog=a=>{ let p=0; return JSON.stringify({b:logBase,e:a.map(e=>{ const d=e.t-p; p=e.t; return [d,e.k,e.d]; })}); };
+function unpackLog(str){
+  const raw=JSON.parse(str)||[], list=Array.isArray(raw)?raw:(raw.e||[]);
+  logBase=Array.isArray(raw)?0:(raw.b||0);
+  let p=0;
+  return list.map(e=>Array.isArray(e)?(p+=e[0],{t:p,k:e[1],d:e[2]||''}):(p=e.t,{t:e.t,k:e.k,d:e.d||''}));
 }
+function log(kind,detail){
+  const last=actlog.length?actlog[actlog.length-1].t:0;
+  const e={t:Math.max(Date.now(),last),k:kind,d:detail===undefined?'':String(detail)};   // the record never runs backwards
+  actlog.push(e);
+  if(actlog.length>LOG_MAX+300){ const drop=actlog.length-LOG_MAX; actlog=actlog.slice(drop); logBase+=drop; }
+  clearTimeout(logT); logT=setTimeout(flushLog,1500);        // a burst of taps is one write
+}
+function flushLog(){ clearTimeout(logT); try{ STORE.set(LOG_KEY,packLog(actlog)); }catch(e){} }
+const secs=ms=>ms<1000?Math.round(ms)+'ms':ms<60000?(ms/1000).toFixed(1)+'s':ms<3600000?Math.round(ms/60000)+'m':(ms/3600000).toFixed(1)+'h';
+const clip=(v,n)=>{ v=String(v).replace(/\s+/g,' ').trim(); return v.length>n?v.slice(0,n)+'…':v; };
+const devLabel=()=>{
+  const u=navigator.userAgent;
+  const os=/Android/.test(u)?'Android':/iPhone|iPad|iPod/.test(u)?'iOS':/Windows/.test(u)?'Windows':/Mac OS/.test(u)?'Mac':/Linux/.test(u)?'Linux':'other';
+  let how='browser';
+  try{ if(matchMedia('(display-mode: standalone)').matches) how='installed'; }catch(e){}
+  return devId+' · '+os+' · '+how;
+};
+/* Every tap, before its handler runs, so the log reads as tap → what the app did. */
+function tapLabel(el){
+  const aria=el.getAttribute('aria-label'), t=clip(el.textContent||'',40);
+  if(aria) return aria;
+  return el.id?el.id+(t?' ("'+t+'")':''):(t||el.className||el.tagName.toLowerCase());
+}
+let lastTap=0;
+document.addEventListener('click',e=>{
+  const el=e.target&&e.target.closest?e.target.closest('button,label,input,textarea,select,a,.scrim,.card'):null;
+  const gap=lastTap?'  (+'+secs(Date.now()-lastTap)+')':''; lastTap=Date.now();
+  if(!el||el.disabled) return log('TAP','background'+where()+gap);
+  log('TAP',tapLabel(el)+where()+gap);
+},true);
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape') log('TAP','Escape key');
+  else if(e.key==='Enter'&&/INPUT|TEXTAREA/.test(e.target.tagName)) log('TAP','Enter in '+(e.target.id||'a text box'));
+},true);
+document.addEventListener('change',e=>{
+  const el=e.target; if(!el||!el.id) return;
+  if(el.tagName==='SELECT') log('picked',el.id+': '+clip(el.options[el.selectedIndex]?el.options[el.selectedIndex].text:el.value,40));
+  else if(el.type==='checkbox') log('picked',el.id+': '+(el.checked?'on':'off'));
+},true);
+/* typing in any box that has an id, including typing that gets abandoned */
+const typing={};
+document.addEventListener('focusin',e=>{ const el=e.target; if(el&&el.id&&/INPUT|TEXTAREA/.test(el.tagName)&&!/checkbox|file|password/.test(el.type)) typing[el.id]={n:0,t:Date.now()}; });
+document.addEventListener('input',e=>{ const w=e.target&&typing[e.target.id]; if(w) w.n++; },true);
+document.addEventListener('focusout',e=>{
+  const el=e.target, w=el&&typing[el.id]; if(!w) return;
+  delete typing[el.id]; if(!w.n) return;
+  const v=(el.value||'').trim();
+  log('typing',el.id+': '+w.n+' edit'+(w.n===1?'':'s')+' over '+secs(Date.now()-w.t)+(v?', holding "'+clip(v,60)+'" ('+v.length+' chars)':', left empty'));
+});
+/* sessions: opened, left, back, closed, and for how long */
+let openedAt=Date.now(), awayAt=0, leftAt=0;
+const BLIP=1500;            // Android flickers the page hidden and back on launch
+function logOpen(){
+  const sum=appSummary();
+  log('app','opened · '+APP.build+' · '+devLabel()+' · '+(innerWidth?innerWidth+'×'+innerHeight:'started in the background')+' · '+(navigator.onLine?'online':'offline')+(sum?' · '+sum:''));
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){
+    awayAt=Date.now();
+    if(awayAt-openedAt>BLIP){ log('app','left after '+secs(awayAt-openedAt)); leftAt=awayAt; }
+    flushLog();
+    if(ghTok&&unsentCount()) sendLog(false,true);
+  }else{
+    const gone=Date.now()-awayAt;
+    if(!awayAt||gone<BLIP) return;
+    log('app','back after '+secs(gone)+' away'); openedAt=Date.now();
+  }
+});
+addEventListener('pagehide',()=>{ const now=Date.now(); if(now-leftAt>BLIP&&now-openedAt>BLIP) log('app','closed after '+secs(now-openedAt)); flushLog(); });
+addEventListener('online',()=>log('net','back online'));
+addEventListener('offline',()=>log('net','went offline'));
+/* anything that breaks, instead of breaking silently */
+addEventListener('error',e=>log('ERROR',(e.message||'?')+' @ '+String(e.filename||'').split('/').pop()+':'+(e.lineno||'?')));
+addEventListener('unhandledrejection',e=>log('ERROR','unhandled: '+((e.reason&&(e.reason.message||e.reason))||'?')));
+let scT=null, scLast=0, scN=0;
+addEventListener('scroll',()=>{
+  scN++; clearTimeout(scT);
+  scT=setTimeout(()=>{
+    const max=document.documentElement.scrollHeight-innerHeight, pct=max>0?Math.round(scrollY/max*100):0;
+    if(Math.abs(pct-scLast)<10){ scN=0; return; }
+    log('view','scrolled to '+pct+'% ('+scN+' scroll'+(scN===1?'':'s')+')'+where()); scLast=pct; scN=0;
+  },600);
+},{passive:true});
 function logText(){
   const p=n=>String(n).padStart(2,'0');
-  const stamp=t=>{const d=new Date(t);
-    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());};
+  const stamp=t=>{ const d=new Date(t); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); };
   return [APP.title+' — activity log','exported: '+stamp(Date.now()),'build: '+APP.build,
-    'entries: '+actlog.length,'agent: '+navigator.userAgent,''.padEnd(60,'-'),''].join('\n')
-    +actlog.map(e=>stamp(e.t)+'  '+e.k.padEnd(14)+'  '+e.d).join('\n')+'\n';
+    'entries: '+actlog.length+' of '+LOG_MAX+', numbered #'+logBase+' to #'+(logBase+actlog.length-1)+'   covering: '+(actlog.length?stamp(actlog[0].t)+' onwards':'nothing yet'),
+    'device: '+devLabel(),'sync: '+($('syncword')?$('syncword').textContent:'?'),'data: '+(appSummary()||'—'),
+    'agent: '+navigator.userAgent,'',''.padEnd(66,'-'),'',
+    'TAP lines are things you did. The lines under each one are what the app did about it.',''].join('\n')
+    +actlog.map((e,i)=>'#'+String(logBase+i).padStart(6,'0')+'  '+stamp(e.t)+'  '+e.k.padEnd(11)+'  '+e.d).join('\n')+'\n';
 }
+
+/* ---- sending the log to the private GitHub repo ----
+   Goes out by itself whenever the app is left, and every few minutes while it
+   is open, so nothing has to be exported. One token per device, shared by every
+   app on this site: read from this app's own key, or from the Shopping app's.
+   Each app writes under its own folder in the repo (the first part of dbPath). */
+const GH_KEY=APP.key+'-gh', GH_META_KEY=APP.key+'-ghmeta', GH_SHARED_KEY='shop-gh-1', GH_SHARED_REPO_KEY='shop-ghrepo-1';
+const GH_FOLDER=APP.dbPath.split('/')[0];
+let ghTok='', ghRepo='Eli-Meyer42/shopping-logs', ghMeta={n:0,okAt:0}, ghBusy=false, ghState='';
+const b64=str=>btoa(unescape(encodeURIComponent(str)));
+const unsentCount=()=>Math.max(0,logBase+actlog.length-Math.max(ghMeta.n,logBase));
+async function ghLoad(){
+  let from='';
+  try{ ghTok=(await STORE.get(GH_KEY))||''; from=ghTok?'this app':''; }catch(e){}
+  if(!ghTok){ try{ ghTok=(await STORE.get(GH_SHARED_KEY))||''; from=ghTok?'another app on this device':''; }catch(e){} }
+  try{ const r=await STORE.get(GH_SHARED_REPO_KEY); if(r&&/^[\w.-]+\/[\w.-]+$/.test(r)) ghRepo=r; }catch(e){}
+  try{ const m=JSON.parse((await STORE.get(GH_META_KEY))||'null'); if(m&&typeof m==='object') ghMeta={n:+m.n||0,okAt:+m.okAt||0}; }catch(e){}
+  log('send-setup',ghTok?'token found (from '+from+'), sending to '+ghRepo+'/'+GH_FOLDER:'no token on this device, log stays here');
+  ghPaint();
+}
+function ghPaint(){
+  const el=$('ghstate'); if(!el) return;
+  const n=unsentCount();
+  el.textContent=!ghTok?'Not sending: no GitHub token on this device. Paste one below.'
+    :(ghState||('Sending to '+ghRepo+'. Last sent '+(ghMeta.okAt?new Date(ghMeta.okAt).toLocaleString():'never')+'. '+n+(n===1?' entry':' entries')+' waiting.'));
+}
+const ghPath=from=>GH_FOLDER+'/logs/'+(devId||'unknown')+'/b'+String(Math.floor(from/20000)).padStart(3,'0')+'/n'+String(from).padStart(9,'0')+'.json';
+async function sendLog(manual,keepalive){
+  if(!ghTok){ if(manual) flash('Paste a GitHub token first.'); return; }
+  if(ghBusy){ if(manual) flash('Already sending.'); return; }
+  const lost=Math.max(0,logBase-ghMeta.n), from=Math.max(ghMeta.n,logBase);
+  const batch=actlog.slice(from-logBase,from-logBase+(keepalive?300:4000));
+  if(!batch.length){ ghState=''; ghPaint(); if(manual) flash('Nothing new since the last send.'); return; }
+  const to=from+batch.length-1, more=actlog.length-(from-logBase)>batch.length;
+  const body={app:APP.title,build:APP.build,device:devLabel(),agent:navigator.userAgent,sentAt:new Date().toISOString(),from:from,to:to,lost:lost,
+    covers:[new Date(batch[0].t).toISOString(),new Date(batch[batch.length-1].t).toISOString()],
+    summary:appSummary(),entries:batch.map(e=>[e.t,e.k,e.d])};
+  ghBusy=true; ghState='Sending '+batch.length+'…'; ghPaint();
+  let again=false;
+  try{
+    const url='https://api.github.com/repos/'+ghRepo+'/contents/'+ghPath(from);
+    const r=await fetch(url,{method:'PUT',keepalive:!!keepalive,headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github+json'},
+      body:JSON.stringify({message:'log: '+APP.title+' entries '+from+'–'+to+' from '+devId,content:b64(JSON.stringify(body))})});
+    if(r.ok){
+      ghMeta={n:to+1,okAt:Date.now()}; STORE.set(GH_META_KEY,JSON.stringify(ghMeta)); ghState='';
+      log('send','entries #'+from+'–#'+to+(lost?' ('+lost+' older ones were lost before sending)':''));
+      if(manual) flash('Log sent: '+batch.length+(batch.length===1?' entry.':' entries.'));
+      again=more&&!keepalive;
+    }else if(r.status===422||r.status===409){            // that file is already there: an earlier send landed without us hearing back
+      let upto=to;
+      try{ const g=await fetch(url,{headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github.raw+json'},cache:'no-store'}); if(g.ok){ const j=await g.json(); if(+j.to>=from) upto=+j.to; } }catch(e){}
+      ghMeta={n:upto+1,okAt:Date.now()}; STORE.set(GH_META_KEY,JSON.stringify(ghMeta)); ghState='';
+      log('send','#'+from+'–#'+upto+' were already there, carrying on after them'); again=!keepalive&&unsentCount()>0;
+    }else{
+      const why=r.status===401?'the token was refused (expired or revoked)':r.status===404||r.status===403?'the token cannot write to '+ghRepo:'GitHub answered '+r.status;
+      ghState='Not sent: '+why+'.'; log('send-fail',why); if(manual) flash(ghState);
+    }
+  }catch(e){ ghState='Not sent: no connection. It will try again.'; log('send-fail','network: '+(e&&e.message||'?')); if(manual) flash(ghState); }
+  ghBusy=false; ghPaint();
+  if(again) sendLog(manual,false);
+}
+setInterval(()=>{ if(!document.hidden&&ghTok&&unsentCount()>=15) sendLog(false,false); },3*60*1000);
 
 /* ---- save / load ---- */
 let rev=0, saveWarned=false;
@@ -226,26 +394,33 @@ async function save(){
   rev=Date.now();
   const ok=await STORE.set(APP.key,JSON.stringify(snap()));
   cloudPush();
+  if(!ok) log('storage','SAVE FAILED: this browser refused the write');
   if(!ok&&!saveWarned){ saveWarned=true; flash('This browser won’t let the app save. Use Export backup before closing.'); }
   return ok;
 }
 async function load(){
   try{ const raw=await STORE.get(APP.key); if(raw) applyState(JSON.parse(raw)); }catch(e){}
-  try{ const r=await STORE.get(LOG_KEY); if(r) actlog=JSON.parse(r)||[]; }catch(e){}
+  try{ const early=actlog, r=await STORE.get(LOG_KEY); if(r) actlog=unpackLog(r).concat(early); }catch(e){}
+  try{ devId=(await STORE.get(DEV_KEY))||''; }catch(e){}
+  if(!devId){ devId='d'+Math.random().toString(36).slice(2,7); try{ await STORE.set(DEV_KEY,devId); }catch(e){} }
   $('apptitle').textContent=APP.title;
   document.title=APP.title;
   $('build').textContent=APP.build;
   drawLinks();
   cloudStart();
   draw();
+  logOpen();
+  await ghLoad();
+  if(ghTok&&unsentCount()>40) sendLog(false,false);
 }
 
 /* ---- cloud sync ---- */
-let cloudRef=null, cloudSeen=0, pushT=null;
+let cloudRef=null, cloudSeen=0, pushT=null, cloudWas='';
 function cloudSay(s){
   const d=$('syncdot'), t=$('syncword');
   const label={live:'Synced',saving:'Saving…',offline:'Offline — will sync later',
     off:'Not connected',error:'Sync error'}[s]||s;
+  if(label!==cloudWas){ cloudWas=label; log('sync',label); }
   if(d) d.className='syncdot '+s;
   if(t) t.textContent=label;
 }
@@ -261,7 +436,7 @@ function cloudStart(){
       if(d.rev===cloudSeen) return;
       if((d.rev||0)<=rev) return;
       cloudSeen=d.rev||0;
-      log('cloud-in','adopted remote state');
+      log('cloud-in','took the newer copy from another device');
       if(applyState(d)){ STORE.set(APP.key,JSON.stringify(snap())); draw(); flash('Updated from your other device.'); }
     },err=>{ cloudSay('error'); console.warn('cloud read failed:',err&&err.message); });
   }catch(e){ cloudSay('error'); console.warn('cloud init failed:',e&&e.message); }
@@ -272,13 +447,13 @@ function cloudPush(){
   pushT=setTimeout(()=>{
     const d=snap(); cloudSeen=d.rev; cloudSay('saving');
     cloudRef.set(d).then(()=>cloudSay('live'))
-      .catch(e=>{ cloudSay('error'); console.warn('cloud write failed:',e&&e.message); });
+      .catch(e=>{ log('sync','WRITE FAILED: '+(e&&(e.code||e.message)||'?')); cloudSay('error'); console.warn('cloud write failed:',e&&e.message); });
   },400);
 }
 
 /* ---- settings ---- */
 let flashT;
-function flash(m){ $('foot').textContent=m; clearTimeout(flashT); flashT=setTimeout(()=>{$('foot').textContent='';},6000); }
+function flash(m){ log('says',m); $('foot').textContent=m; clearTimeout(flashT); flashT=setTimeout(()=>{$('foot').textContent='';},6000); }
 function drawLinks(){
   const box=$('links'); box.innerHTML='';
   APP.links.forEach(l=>{
@@ -288,13 +463,13 @@ function drawLinks(){
     box.appendChild(a);
   });
   $('logcount').textContent=actlog.length
-    ? actlog.length+' entries recorded.' : 'No activity recorded yet.';
+    ? actlog.length+' of '+LOG_MAX+' entries, '+Math.round(packLog(actlog).length/1024)+' KB, on device '+devId+'.' : 'No activity recorded yet.';
 }
 function show(id){ $('scrim').classList.add('on'); $(id).classList.add('on'); }
 function closeSheets(){ ['sheet-set'].forEach(i=>$(i).classList.remove('on')); $('scrim').classList.remove('on'); }
 $('scrim').addEventListener('click',closeSheets);
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheets(); });
-$('gear').addEventListener('click',()=>{ drawLinks(); wipeDisarm(); show('sheet-set'); });
+$('gear').addEventListener('click',()=>{ drawLinks(); ghPaint(); wipeDisarm(); show('sheet-set'); });
 
 function download(name,text,type){
   const a=document.createElement('a');
@@ -316,13 +491,21 @@ $('imp-file').addEventListener('change',e=>{
   }catch(err){ flash('That file could not be read.'); } };
   r.readAsText(f); e.target.value='';
 });
+$('send-log').addEventListener('click',()=>sendLog(true,false));
+$('gh-save').addEventListener('click',async()=>{
+  const t=$('gh-token').value.trim(); $('gh-token').value='';
+  if(!t){ flash('Paste the token into the box first.'); return; }
+  ghTok=t; ghState='';
+  try{ await STORE.set(GH_KEY,t); }catch(e){}
+  log('send-setup','token saved on this device'); ghPaint(); sendLog(true,false);
+});
 $('exp-log').addEventListener('click',()=>{
   if(!actlog.length){ flash('Nothing in the log yet.'); return; }
   download(APP.key+'-log.txt',logText());
   flash('Log exported — '+actlog.length+' entries.');
 });
 $('clr-log').addEventListener('click',()=>{
-  actlog=[]; try{ STORE.set(LOG_KEY,'[]'); }catch(e){}
+  logBase+=actlog.length; actlog=[]; flushLog();
   drawLinks(); flash('Activity log cleared.');
 });
 
