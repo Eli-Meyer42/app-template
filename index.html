@@ -43,6 +43,7 @@
   .btn{cursor:pointer;font-weight:600;}
   .primary{background:var(--ink);color:#fff;border-color:var(--ink);}
   .btn.arm{background:var(--warn);border-color:var(--warn);color:#fff;}
+  .alertbar{margin:12px 0 0;padding:11px 13px;border-radius:12px;background:var(--warn);color:#fff;font-size:14px;font-weight:500;}
   .foot{margin-top:16px;font-size:13px;color:var(--faint);text-align:center;min-height:18px;}
 
   .scrim{position:fixed;inset:0;background:rgba(42,48,52,.34);z-index:60;opacity:0;pointer-events:none;transition:opacity .2s;}
@@ -82,6 +83,8 @@
   </div>
 </header>
 
+<div class="wrap"><p class="alertbar" id="alertbar" style="display:none"></p></div>
+
 <main class="wrap" id="main"></main>
 
 <div class="wrap"><p class="foot" id="foot"></p></div>
@@ -98,7 +101,9 @@
   <div class="lab">Backup</div>
   <div class="stack">
     <button class="btn" id="exp">Export backup file</button>
-    <button class="btn" id="imp">Restore from backup</button>
+    <button class="btn" id="imp">Restore from a backup file</button>
+    <button class="btn" id="online-backups">Restore an online backup…</button>
+    <div class="stack" id="backups"></div>
     <input type="file" id="imp-file" accept=".json" style="display:none">
   </div>
 
@@ -123,11 +128,9 @@
   <div class="lab">Links</div>
   <div class="stack" id="links"></div>
 
-  <p class="buildstamp" id="build">Build 1</p>
+  <p class="buildstamp" id="build">Build</p>
 </div>
 
-<script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-database-compat.js"></script>
 <script>
 /* ============================================================
    APP CONFIG — the only block most new apps need to change.
@@ -136,7 +139,9 @@ const APP={
   title:   'App',                 // shown in the header
   key:     'app-v1',              // local storage key, unique per app
   dbPath:  'app/main',            // Firebase branch, unique per app
-  build:   'Build 1 · 24 Nov 2026',
+  buildN:  2,                     // a plain number, +1 on every deploy: an older copy of the app refuses to run over a newer one's data
+  build:   'Build 2 · 25 Nov 2026',
+  lists:   ['items'],             // which fields of `data` are lists of records (see APP STATE)
   links:[                         // shown in settings
     // {label:'GitHub repository', url:'https://github.com/Eli-Meyer42/…'},
     // {label:'Deploy history',    url:'https://github.com/Eli-Meyer42/…/deployments'},
@@ -156,6 +161,14 @@ const FIREBASE={
 /* ============================================================
    APP STATE — put the app's own data in here.
    Anything on `data` is saved locally and synced automatically.
+
+   Two kinds of field, and the difference matters for sync:
+   · a LIST of records — name it in APP.lists. Each record is an object; it is
+     given an `id` and a change time `u` by save(). Two devices that each add,
+     edit or delete different records both keep their changes.
+   · anything else (a setting, a counter, a map) — synced whole: whichever
+     device changed that one field most recently wins it.
+   Start every list empty. Don't put starter records in it here.
    ============================================================ */
 let data={ items:[] };
 
@@ -163,10 +176,9 @@ let data={ items:[] };
 function draw(){
   $('main').innerHTML=
     '<div class="card"><h2>Ready</h2>'+
-    '<p>Storage, sync, backup and the full activity log are wired up. '+
+    '<p>Storage, sync that merges, daily backups and the full activity log are wired up. '+
     'Put the app’s state in <code>data</code>, call <code>save()</code> when it changes, '+
     'and build the interface in <code>draw()</code>.</p></div>';
-  $('foot').textContent='';
 }
 
 /* ============================================================
@@ -174,6 +186,31 @@ function draw(){
    ============================================================ */
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---- an old copy of the app must never write over a newer one's data ----
+   The newest build this device has run is written down. A copy older than
+   that (an old browser tab brought back, a stale page from the browser's own
+   cache) saves nothing, syncs nothing, sends nothing, and goes to fetch the
+   current version instead. */
+const BUILD_KEY=APP.key+'-buildn';
+let STALE=false;
+function checkStale(){
+  try{ const seen=+localStorage.getItem(BUILD_KEY)||0;
+    if(seen>APP.buildN) STALE=true; else if(seen<APP.buildN) localStorage.setItem(BUILD_KEY,String(APP.buildN)); }catch(e){}
+  return STALE;
+}
+checkStale();
+function goFresh(){
+  let tried=0; try{ tried=+sessionStorage.getItem(APP.key+'-fresh')||0; sessionStorage.setItem(APP.key+'-fresh',String(tried+1)); }catch(e){}
+  const say=m=>{ const d=document.createElement('div');
+    d.style.cssText='position:fixed;inset:0;z-index:999;background:var(--bg);color:var(--ink);display:grid;place-items:center;padding:32px;text-align:center;font-weight:600;font-size:18px';
+    d.textContent=m; document.body.appendChild(d); };
+  if(tried>=2){ say('This is an old copy of the app and the current one could not be loaded. Check the connection, then close this and open the app again.'); return; }
+  say('Loading the current version…');
+  const go=()=>location.replace(location.pathname+'?fresh='+Date.now());
+  try{ caches.keys().then(k=>Promise.all(k.filter(x=>x.startsWith(APP.key.split('-')[0])).map(x=>caches.delete(x)))).then(go,go); }catch(e){ go(); }
+}
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&!STALE&&checkStale()) goFresh(); });
 
 /* ---- storage: localStorage, then IndexedDB, then memory ---- */
 const STORE=(()=>{
@@ -195,8 +232,12 @@ const STORE=(()=>{
       return mem[k]||null;
     },
     async set(k,v){
+      if(STALE) return true;                       // an old copy never writes
       let ok=false; mem[k]=v;
-      if(hasLS){try{localStorage.setItem(k,v); ok=true;}catch(e){}}
+      /* reads try localStorage first, so if a write there fails (it is the
+         smaller store) the old value must go, or the next launch would load
+         it over the newer copy sitting in IndexedDB */
+      if(hasLS){try{localStorage.setItem(k,v); ok=true;}catch(e){ try{localStorage.removeItem(k);}catch(_){} }}
       try{ await idbSet(k,v); ok=true; }catch(e){}
       return ok;
     }
@@ -275,7 +316,7 @@ document.addEventListener('focusout',e=>{
   log('typing',el.id+': '+w.n+' edit'+(w.n===1?'':'s')+' over '+secs(Date.now()-w.t)+(v?', holding "'+clip(v,60)+'" ('+v.length+' chars)':', left empty'));
 });
 /* sessions: opened, left, back, closed, and for how long */
-let openedAt=Date.now(), awayAt=0, leftAt=0;
+let openedAt=Date.now(), awayAt=0, leftAt=0, shownAt=Date.now();
 const BLIP=1500;            // Android flickers the page hidden and back on launch
 function logOpen(){
   const sum=appSummary();
@@ -284,16 +325,18 @@ function logOpen(){
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){
     awayAt=Date.now();
-    if(awayAt-openedAt>BLIP){ log('app','left after '+secs(awayAt-openedAt)); leftAt=awayAt; }
+    if(awayAt-openedAt>BLIP&&awayAt-leftAt>BLIP){ log('app','left after '+secs(awayAt-openedAt)); leftAt=awayAt; }
     flushLog();
     if(ghTok&&unsentCount()) sendLog(false,true);
   }else{
     const gone=Date.now()-awayAt;
     if(!awayAt||gone<BLIP) return;
-    log('app','back after '+secs(gone)+' away'); openedAt=Date.now();
+    log('app','back after '+secs(gone)+' away'); openedAt=shownAt=Date.now();
+    /* the send made on leaving is often cut short by the phone: this is the dependable one */
+    setTimeout(()=>{ if(ghTok&&unsentCount()) sendLog(false,false); dailyBackup(); },3000);
   }
 });
-addEventListener('pagehide',()=>{ const now=Date.now(); if(now-leftAt>BLIP&&now-openedAt>BLIP) log('app','closed after '+secs(now-openedAt)); flushLog(); });
+addEventListener('pagehide',()=>{ const now=Date.now(); if(now-leftAt>BLIP&&now-openedAt>BLIP){ log('app','closed after '+secs(now-openedAt)); leftAt=now; } flushLog(); });
 addEventListener('online',()=>log('net','back online'));
 addEventListener('offline',()=>log('net','went offline'));
 /* anything that breaks, instead of breaking silently */
@@ -319,79 +362,255 @@ function logText(){
     +actlog.map((e,i)=>'#'+String(logBase+i).padStart(6,'0')+'  '+stamp(e.t)+'  '+e.k.padEnd(11)+'  '+e.d).join('\n')+'\n';
 }
 
-/* ---- sending the log to the private GitHub repo ----
-   Goes out by itself whenever the app is left, and every few minutes while it
-   is open, so nothing has to be exported. One token per device, shared by every
-   app on this site: read from this app's own key, or from the Shopping app's.
-   Each app writes under its own folder in the repo (the first part of dbPath). */
+/* ---- the private GitHub repo: the log, and a dated copy of the data ----
+   Both go out by themselves, so nothing has to be exported. One token per
+   device, shared by every app on this site: read from this app's own key, or
+   from the Shopping app's. Each app writes under its own folder in the repo
+   (the first part of dbPath). The token is never in this file and never in
+   the synced data. */
 const GH_KEY=APP.key+'-gh', GH_META_KEY=APP.key+'-ghmeta', GH_SHARED_KEY='shop-gh-1', GH_SHARED_REPO_KEY='shop-ghrepo-1';
 const GH_FOLDER=APP.dbPath.split('/')[0];
-let ghTok='', ghRepo='Eli-Meyer42/shopping-logs', ghMeta={n:0,okAt:0}, ghBusy=false, ghState='';
-const b64=str=>btoa(unescape(encodeURIComponent(str)));
+/* n: number of the next entry to send · lastT: the time on the last entry that
+   arrived (NOT the time of the last upload — backups upload too) · snapDay: the last backup */
+let ghTok='', ghRepo='Eli-Meyer42/shopping-logs', ghMeta={n:0,lastT:0,okAt:0,fails:0,err:'',snapDay:''}, ghBusy=false, snapBusy=false, ghState='';
+const b64=str=>{ let o=''; new TextEncoder().encode(str).forEach(c=>o+=String.fromCharCode(c)); return btoa(o); };
 const unsentCount=()=>Math.max(0,logBase+actlog.length-Math.max(ghMeta.n,logBase));
+const saveMeta=()=>STORE.set(GH_META_KEY,JSON.stringify(ghMeta));
+const ghUrl=path=>'https://api.github.com/repos/'+ghRepo+'/contents/'+path;
+const ghPut=(path,obj,msg,keepalive)=>fetch(ghUrl(path),{method:'PUT',keepalive:!!keepalive,
+  headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github+json'},
+  body:JSON.stringify({message:msg,content:b64(JSON.stringify(obj))})});
+const ghGet=path=>fetch(ghUrl(path),{headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github.raw+json'},cache:'no-store'});
+const ghOk=()=>{ ghMeta.okAt=Date.now(); ghMeta.fails=0; ghMeta.err=''; saveMeta(); health(); };
+const ghBad=why=>{ ghMeta.fails=(ghMeta.fails||0)+1; ghMeta.err=why; saveMeta(); health(); };
+const whyNot=st=>st===401?'the token was refused (expired or revoked)':st===404||st===403?'the token cannot write to '+ghRepo:'GitHub answered '+st;
 async function ghLoad(){
   let from='';
   try{ ghTok=(await STORE.get(GH_KEY))||''; from=ghTok?'this app':''; }catch(e){}
   if(!ghTok){ try{ ghTok=(await STORE.get(GH_SHARED_KEY))||''; from=ghTok?'another app on this device':''; }catch(e){} }
   try{ const r=await STORE.get(GH_SHARED_REPO_KEY); if(r&&/^[\w.-]+\/[\w.-]+$/.test(r)) ghRepo=r; }catch(e){}
-  try{ const m=JSON.parse((await STORE.get(GH_META_KEY))||'null'); if(m&&typeof m==='object') ghMeta={n:+m.n||0,okAt:+m.okAt||0}; }catch(e){}
+  try{ const m=JSON.parse((await STORE.get(GH_META_KEY))||'null'); if(m&&typeof m==='object') Object.assign(ghMeta,m); }catch(e){}
+  mendNumbers();
   log('send-setup',ghTok?'token found (from '+from+'), sending to '+ghRepo+'/'+GH_FOLDER:'no token on this device, log stays here');
-  ghPaint();
+  ghPaint(); health();
+}
+/* The numbers must agree with what has been sent. If the log on this device
+   was ever replaced, its entries start again from zero while the marker says
+   hundreds have gone, and then nothing is sent at all, silently. Everything
+   written after the last entry that arrived is unsent: the numbers resume there. */
+function mendNumbers(){
+  if(!ghMeta.n) return;
+  const lastSent=actlog[ghMeta.n-1-logBase];
+  const short=logBase+actlog.length<ghMeta.n, wrong=!!(lastSent&&ghMeta.lastT&&lastSent.t!==ghMeta.lastT);
+  if(!short&&!wrong) return;
+  const k=actlog.filter(e=>e.t<=(ghMeta.lastT||0)).length, was=logBase;
+  if(k>ghMeta.n){ actlog=actlog.slice(k-ghMeta.n); logBase=0; } else logBase=ghMeta.n-k;
+  log('log-mend','the log on this device had been replaced and its numbering restarted (from #'+was+'); renumbered so unsent entries follow on from #'+ghMeta.n);
+  flushLog();
 }
 function ghPaint(){
   const el=$('ghstate'); if(!el) return;
   const n=unsentCount();
   el.textContent=!ghTok?'Not sending: no GitHub token on this device. Paste one below.'
-    :(ghState||('Sending to '+ghRepo+'. Last sent '+(ghMeta.okAt?new Date(ghMeta.okAt).toLocaleString():'never')+'. '+n+(n===1?' entry':' entries')+' waiting.'));
+    :(ghState||('Sending to '+ghRepo+'. Last reached GitHub '+(ghMeta.okAt?new Date(ghMeta.okAt).toLocaleString():'never')+'. '+n+(n===1?' entry':' entries')+' waiting.'+
+      (ghMeta.snapDay?' Last backup '+ghMeta.snapDay+'.':'')));
+}
+/* a problem that needs him is said on the main screen, not left in settings */
+function health(){
+  const b=$('alertbar'); if(!b) return;
+  let m='';
+  if(ghTok&&ghMeta.fails>=3&&/token/.test(ghMeta.err||'')) m='History and backups are not reaching GitHub: '+ghMeta.err+'. Open settings and paste a new token.';
+  else if(ghTok&&ghMeta.n&&logBase+actlog.length<ghMeta.n) m='The activity log on this device is out of step with what was sent. Reopen the app; if this stays, tell Claude.';
+  b.textContent=m; b.style.display=m?'block':'none';
 }
 const ghPath=from=>GH_FOLDER+'/logs/'+(devId||'unknown')+'/b'+String(Math.floor(from/20000)).padStart(3,'0')+'/n'+String(from).padStart(9,'0')+'.json';
 async function sendLog(manual,keepalive){
+  if(STALE) return;
   if(!ghTok){ if(manual) flash('Paste a GitHub token first.'); return; }
   if(ghBusy){ if(manual) flash('Already sending.'); return; }
   const lost=Math.max(0,logBase-ghMeta.n), from=Math.max(ghMeta.n,logBase);
   const batch=actlog.slice(from-logBase,from-logBase+(keepalive?300:4000));
   if(!batch.length){ ghState=''; ghPaint(); if(manual) flash('Nothing new since the last send.'); return; }
-  const to=from+batch.length-1, more=actlog.length-(from-logBase)>batch.length;
+  const to=from+batch.length-1, more=actlog.length-(from-logBase)>batch.length, lastT=batch[batch.length-1].t;
   const body={app:APP.title,build:APP.build,device:devLabel(),agent:navigator.userAgent,sentAt:new Date().toISOString(),from:from,to:to,lost:lost,
-    covers:[new Date(batch[0].t).toISOString(),new Date(batch[batch.length-1].t).toISOString()],
+    covers:[new Date(batch[0].t).toISOString(),new Date(lastT).toISOString()],
     summary:appSummary(),entries:batch.map(e=>[e.t,e.k,e.d])};
+  const msg='log: '+APP.title+' entries '+from+'–'+to+' from '+devId;
+  const done=(upto,t,note)=>{ ghMeta.n=upto+1; ghMeta.lastT=t; ghState=''; ghOk(); log('send',note); };
   ghBusy=true; ghState='Sending '+batch.length+'…'; ghPaint();
   let again=false;
   try{
-    const url='https://api.github.com/repos/'+ghRepo+'/contents/'+ghPath(from);
-    const r=await fetch(url,{method:'PUT',keepalive:!!keepalive,headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github+json'},
-      body:JSON.stringify({message:'log: '+APP.title+' entries '+from+'–'+to+' from '+devId,content:b64(JSON.stringify(body))})});
+    const r=await ghPut(ghPath(from),body,msg,keepalive);
     if(r.ok){
-      ghMeta={n:to+1,okAt:Date.now()}; STORE.set(GH_META_KEY,JSON.stringify(ghMeta)); ghState='';
-      log('send','entries #'+from+'–#'+to+(lost?' ('+lost+' older ones were lost before sending)':''));
+      done(to,lastT,'entries #'+from+'–#'+to+(lost?' ('+lost+' older ones were lost before sending)':''));
       if(manual) flash('Log sent: '+batch.length+(batch.length===1?' entry.':' entries.'));
       again=more&&!keepalive;
-    }else if(r.status===422||r.status===409){            // that file is already there: an earlier send landed without us hearing back
-      let upto=to;
-      try{ const g=await fetch(url,{headers:{Authorization:'Bearer '+ghTok,Accept:'application/vnd.github.raw+json'},cache:'no-store'}); if(g.ok){ const j=await g.json(); if(+j.to>=from) upto=+j.to; } }catch(e){}
-      ghMeta={n:upto+1,okAt:Date.now()}; STORE.set(GH_META_KEY,JSON.stringify(ghMeta)); ghState='';
-      log('send','#'+from+'–#'+upto+' were already there, carrying on after them'); again=!keepalive&&unsentCount()>0;
-    }else{
-      const why=r.status===401?'the token was refused (expired or revoked)':r.status===404||r.status===403?'the token cannot write to '+ghRepo:'GitHub answered '+r.status;
-      ghState='Not sent: '+why+'.'; log('send-fail',why); if(manual) flash(ghState);
+    }else if((r.status===422||r.status===409)&&!keepalive){
+      /* a file is already at that number. Ours, from a send that landed without
+         us hearing back? Then carry on after it. Something else? Never skip
+         real entries for it: send these beside it. */
+      const have=await ghGet(ghPath(from)).then(x=>x.ok?x.json():null).catch(()=>null);
+      const ours=have&&Array.isArray(have.entries)&&have.entries[0]&&have.entries[0][0]===batch[0].t;
+      if(ours&&+have.to>=from){ done(+have.to,(actlog[+have.to-logBase]||{}).t||lastT,'#'+from+'–#'+have.to+' were already there, carrying on after them'); again=unsentCount()>0; }
+      else{
+        const r2=await ghPut(ghPath(from).replace(/\.json$/,'-'+batch[0].t+'.json'),body,msg+' (beside a clash)',false);
+        if(r2.ok){ done(to,lastT,'entries #'+from+'–#'+to+' (a different file was already at that number; sent beside it)'); again=more; }
+        else{ ghState='Not sent: a file is in the way.'; ghBad('a file is in the way'); log('send-fail','clash at #'+from+', and '+r2.status+' beside it'); }
+      }
+    }else if(!r.ok){
+      const why=whyNot(r.status);
+      ghState='Not sent: '+why+'.'; ghBad(why); log('send-fail',why); if(manual) flash(ghState);
     }
-  }catch(e){ ghState='Not sent: no connection. It will try again.'; log('send-fail','network: '+(e&&e.message||'?')); if(manual) flash(ghState); }
+  }catch(e){
+    /* a send made as the screen goes off is often cut short by the phone: expected, and it goes on the next open */
+    if(keepalive) log('send-later','the send made on leaving did not get through; it goes on the next open');
+    else{ ghState='Not sent: no connection. It will try again.'; ghBad('no connection'); log('send-fail','network: '+(e&&e.message||'?')); if(manual) flash(ghState); }
+  }
   ghBusy=false; ghPaint();
   if(again) sendLog(manual,false);
 }
 setInterval(()=>{ if(!document.hidden&&ghTok&&unsentCount()>=15) sendLog(false,false); },3*60*1000);
 
-/* ---- save / load ---- */
-let rev=0, saveWarned=false;
-function snap(){ return Object.assign({},data,{rev:rev}); }
+/* A dated copy of everything, once a day, and one more just before anything
+   that replaces the data (a restore, a wipe). Kept in the same private repo. */
+const ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+async function backupState(why){
+  if(STALE||!ghTok||snapBusy) return false;
+  snapBusy=true;
+  const d=new Date(), daily=why==='daily';
+  const name=daily?ymd(d)+'.json':ymd(d)+'-'+why+'-'+d.getTime()+'.json';
+  let ok=false;
+  try{
+    const r=await ghPut(GH_FOLDER+'/state/'+d.getFullYear()+'/'+name,{savedAt:d.toISOString(),why:why,build:APP.build,device:devLabel(),summary:appSummary(),state:snap()},'backup ('+why+'): '+APP.title);
+    ok=r.ok||(daily&&r.status===422);            // today's is already there (another device made it)
+    if(ok){ if(daily) ghMeta.snapDay=ymd(d); ghOk(); if(r.ok) log('backup','saved '+name); }
+    else{ ghBad(whyNot(r.status)); log('backup','FAILED: '+whyNot(r.status)); }
+  }catch(e){ log('backup','FAILED: no connection'); }
+  snapBusy=false; ghPaint(); return ok;
+}
+function dailyBackup(){ if(ghTok&&synced&&ghMeta.snapDay!==ymd(new Date())) backupState('daily'); }
+async function openBackups(){
+  const box=$('backups'); if(!ghTok){ flash('Backups need the GitHub token first.'); return; }
+  box.innerHTML='<p>Looking…</p>';
+  try{
+    const y=new Date().getFullYear(); let files=[];
+    for(const yr of [y,y-1]){ const r=await ghGet(GH_FOLDER+'/state/'+yr); if(r.ok) files=files.concat((await r.json()).map(f=>f.path)); }
+    files=files.filter(p=>/\.json$/.test(p)).sort().reverse().slice(0,14);
+    if(!files.length){ box.innerHTML='<p>No online backups yet. The first is made within a day of the token being added.</p>'; return; }
+    box.innerHTML='';
+    files.forEach(p=>{ const b=document.createElement('button'); b.className='btn'; b.textContent=p.split('/').pop().replace('.json','');
+      b.addEventListener('click',async()=>{
+        b.textContent='Restoring…';
+        try{ const r=await ghGet(p); if(!r.ok) throw 0; const j=await r.json();
+          await backupState('before-restore');
+          if(!adoptState(j.state)) throw 0;
+          draw(); await save(); closeSheets(); flash('Restored the backup from '+p.split('/').pop().replace('.json','')+'.');
+        }catch(e){ flash('That backup could not be read.'); }
+      }); box.appendChild(b); });
+  }catch(e){ box.innerHTML='<p>Could not reach GitHub.</p>'; }
+}
+
+/* ---- save / load, and two copies becoming one ----
+   Every record in a list carries the time it last changed (u); a deleted
+   record leaves a dated marker; every other field has its own change time.
+   Two copies are combined piece by piece: the newer version of each piece
+   wins, an addition on either side is kept, and a deletion only beats a
+   record that hasn't been touched since. Without this, whichever device
+   saved last would replace the other's work whole. */
+const GONE_TTL=45*24*3600*1000;
+let rev=0, saveWarned=false, fu={}, gone={}, shadow={}, idSeq=0;
+const IDTAG=Math.random().toString(36).slice(2,6);
+const newId=()=>IDTAG+(Date.now().toString(36))+(idSeq++).toString(36);
+const isList=k=>APP.lists.indexOf(k)>=0;
+/* The same data gives the same text whatever order its keys were made in, and
+   "nothing" is nothing however it is written: Firebase does not keep empty
+   lists, empty objects or blanks, so {a:{}} sent from here comes back as {}. */
+function canon(v){
+  if(v===null||v===undefined||v==='') return '';
+  if(typeof v!=='object') return JSON.stringify(v);
+  if(Array.isArray(v)){ const a=v.map(canon); return a.some(x=>x!=='')?'['+a.join(',')+']':''; }
+  const parts=[]; Object.keys(v).sort().forEach(k=>{ const c=canon(v[k]); if(c!=='') parts.push(JSON.stringify(k)+':'+c); });
+  return parts.length?'{'+parts.join(',')+'}':'';
+}
+const sig=r=>{ const o={}; for(const k in r){ if(k!=='u') o[k]=r[k]; } return canon(o); };
+function reshadow(){
+  shadow={};
+  for(const k in data){ if(isList(k)){ const m={}; (data[k]||[]).forEach(r=>{ m[r.id]=sig(r); }); shadow[k]=m; } else shadow[k]=canon(data[k]); }
+}
+/* what changed since the last save gets the current time */
+function stamp(){
+  const now=Date.now();
+  for(const k in data){
+    if(isList(k)){
+      const was=shadow[k]||{}, here={}; gone[k]=gone[k]||{};
+      (data[k]||[]).forEach(r=>{ if(r.id==null) r.id=newId(); here[r.id]=1; if(was[r.id]!==sig(r)) r.u=now; delete gone[k][r.id]; });
+      for(const id in was){ if(!here[id]) gone[k][id]=now; }
+    } else if(canon(data[k])!==(shadow[k]===undefined?'':shadow[k])) fu[k]=now;
+  }
+  reshadow();
+}
+function snap(){ return Object.assign({},data,{rev:rev,_fu:fu,_gone:gone}); }
 function applyState(d){
-  if(!d) return false;
-  const {rev:r}=d; rev=r||0;
-  const copy=Object.assign({},d); delete copy.rev;
-  data=copy; return true;
+  if(!d||typeof d!=='object') return false;
+  const copy=Object.assign({},d); rev=copy.rev||0; fu=copy._fu||{}; gone=copy._gone||{};
+  delete copy.rev; delete copy._fu; delete copy._gone;
+  APP.lists.forEach(k=>{ if(!Array.isArray(copy[k])) copy[k]=[]; });       // Firebase drops empty lists
+  data=copy; reshadow(); return true;
+}
+/* make a saved copy the truth everywhere: all of it dated now, and anything not in it marked deleted */
+function adoptState(d){
+  const before={}, wasGone=gone; APP.lists.forEach(k=>{ before[k]=(data[k]||[]).map(r=>r.id); });
+  if(!applyState(d)) return false;
+  const now=Date.now(); fu={}; gone={};
+  for(const k in data){ if(isList(k)){ const here={}; data[k].forEach(r=>{ if(r.id==null) r.id=newId(); r.u=now; here[r.id]=1; });
+      /* deletions made before this stay deletions: a device that was away must not bring those records back */
+      gone[k]={}; for(const id in (wasGone[k]||{})){ if(!here[id]) gone[k][id]=wasGone[k][id]; }
+      (before[k]||[]).forEach(id=>{ if(!here[id]) gone[k][id]=now; }); } else fu[k]=now; }
+  reshadow(); return true;
+}
+function mergeSnaps(L,R){
+  const lNewer=(L.rev||0)>(R.rev||0), lf=L._fu||{}, rf=R._fu||{}, lg=L._gone||{}, rg=R._gone||{}, now=Date.now();
+  let gave=false, took=false;                      // did this device / the cloud have anything the other lacked?
+  const S={_fu:{},_gone:{}}, keys={};
+  [L,R].forEach(x=>{ for(const k in x){ if(k!=='rev'&&k!=='_fu'&&k!=='_gone') keys[k]=1; } });
+  APP.lists.forEach(k=>{ keys[k]=1; });
+  for(const k in keys){
+    if(isList(k)){
+      const mine={}, out=[], seen={}, LG=lg[k]||{}, RG=rg[k]||{};
+      (L[k]||[]).forEach(r=>{ mine[r.id]=r; });
+      (R[k]||[]).forEach(r=>{
+        seen[r.id]=1; const l=mine[r.id];
+        if(l){ const lu=l.u||0, ru=r.u||0;
+          /* same content but touched later here: the later time must travel too,
+             or an older deletion elsewhere could still remove it */
+          if(sig(l)===sig(r)){ if(lu>ru){ out.push(l); gave=true; } else out.push(r); return; }
+          if(lu>ru||(lu===ru&&lNewer)){ out.push(l); gave=true; } else{ out.push(r); took=true; } }
+        else if(LG[r.id]&&LG[r.id]>=(r.u||0)) gave=true;           // deleted here after they last touched it
+        else{ out.push(r); took=true; }
+      });
+      (L[k]||[]).forEach(l=>{
+        if(seen[l.id]) return;
+        if(RG[l.id]&&RG[l.id]>=(l.u||0)){ took=true; return; }     // deleted there after we last touched it
+        out.push(l); gave=true;
+      });
+      S[k]=out;
+      const alive={}, g={}; out.forEach(r=>{ alive[r.id]=1; });
+      [LG,RG].forEach(x=>{ for(const id in x){ if(!alive[id]&&now-x[id]<GONE_TTL) g[id]=Math.max(g[id]||0,x[id]); } });
+      for(const id in g){ if(!RG[id]||RG[id]<g[id]) gave=true; }
+      S._gone[k]=g;
+    }else{
+      const a=lf[k]||0, b=rf[k]||0; S._fu[k]=Math.max(a,b);
+      if(canon(L[k])===canon(R[k])){ S[k]=R[k]!==undefined?R[k]:L[k]; continue; }
+      /* different times decide; equal times, a value beats a blank, then the newer copy */
+      const pickL=a!==b?a>b:(canon(R[k])===''?true:canon(L[k])===''?false:lNewer);
+      if(pickL){ S[k]=L[k]; gave=true; } else{ S[k]=R[k]; took=true; }
+    }
+  }
+  S.rev=gave?Math.max(now,(R.rev||0)+1):(R.rev||0);
+  return {state:S,gave:gave,took:took};
 }
 async function save(){
-  rev=Date.now();
+  stamp(); rev=Date.now();
   const ok=await STORE.set(APP.key,JSON.stringify(snap()));
   cloudPush();
   if(!ok) log('storage','SAVE FAILED: this browser refused the write');
@@ -399,56 +618,90 @@ async function save(){
   return ok;
 }
 async function load(){
-  try{ const raw=await STORE.get(APP.key); if(raw) applyState(JSON.parse(raw)); }catch(e){}
+  if(STALE){ goFresh(); return; }
+  $('apptitle').textContent=APP.title; document.title=APP.title; $('build').textContent=APP.build;
+  let had=false;
+  try{ const raw=await STORE.get(APP.key); if(raw) had=applyState(JSON.parse(raw)); }catch(e){}
+  if(!had) reshadow();
   try{ const early=actlog, r=await STORE.get(LOG_KEY); if(r) actlog=unpackLog(r).concat(early); }catch(e){}
   try{ devId=(await STORE.get(DEV_KEY))||''; }catch(e){}
   if(!devId){ devId='d'+Math.random().toString(36).slice(2,7); try{ await STORE.set(DEV_KEY,devId); }catch(e){} }
-  $('apptitle').textContent=APP.title;
-  document.title=APP.title;
-  $('build').textContent=APP.build;
   drawLinks();
-  cloudStart();
-  draw();
+  draw();                                           // the screen first: sync loads after it
   logOpen();
   await ghLoad();
-  if(ghTok&&unsentCount()>40) sendLog(false,false);
+  startSync();
+  setTimeout(()=>{ if(ghTok&&unsentCount()) sendLog(false,false); },3000);
 }
 
-/* ---- cloud sync ---- */
-let cloudRef=null, cloudSeen=0, pushT=null, cloudWas='';
+/* ---- cloud sync ----
+   The sync library is a file in this repo, loaded after the first draw: the
+   app opens from its own cache with no signal, and never waits on a CDN. */
+let cloudRef=null, cloudSeen=0, pushT=null, cloudState='off', cloudLive=false, cloudDirty=false, synced=false;
 function cloudSay(s){
+  const was=cloudState; cloudState=s;
   const d=$('syncdot'), t=$('syncword');
-  const label={live:'Synced',saving:'Saving…',offline:'Offline — will sync later',
-    off:'Not connected',error:'Sync error'}[s]||s;
-  if(label!==cloudWas){ cloudWas=label; log('sync',label); }
+  const label={live:'Synced',saving:'Saving…',offline:'Offline — will sync later',off:'Not connected',error:'Sync error'}[s]||s;
   if(d) d.className='syncdot '+s;
   if(t) t.textContent=label;
+  /* worth a line in the log: an error, or the connection dropping while in use.
+     It drops every time the app is put away and returns every time it opens. */
+  const up=x=>x==='live'||x==='saving';
+  if(s===was||(up(s)&&up(was))) return;
+  if(s==='error'){ log('sync','error'); return; }
+  if(document.hidden||Date.now()-shownAt<5000) return;
+  log('sync',up(s)?'connected':'lost the connection');
+}
+const needScript=src=>new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+function startSync(){
+  needScript('firebase-app-compat.js').then(()=>needScript('firebase-database-compat.js')).then(cloudStart)
+    .catch(()=>{ cloudSay('off'); log('sync','the sync library did not load'); });
 }
 function cloudStart(){
   try{
     if(typeof firebase==='undefined'){ cloudSay('off'); return; }
     firebase.initializeApp(FIREBASE);
     cloudRef=firebase.database().ref(APP.dbPath);
-    firebase.database().ref('.info/connected').on('value',s=>cloudSay(s.val()===true?'live':'offline'));
-    cloudRef.on('value',s=>{
-      const d=s.val();
-      if(!d){ cloudPush(); return; }
-      if(d.rev===cloudSeen) return;
-      if((d.rev||0)<=rev) return;
-      cloudSeen=d.rev||0;
-      log('cloud-in','took the newer copy from another device');
-      if(applyState(d)){ STORE.set(APP.key,JSON.stringify(snap())); draw(); flash('Updated from your other device.'); }
-    },err=>{ cloudSay('error'); console.warn('cloud read failed:',err&&err.message); });
-  }catch(e){ cloudSay('error'); console.warn('cloud init failed:',e&&e.message); }
+    /* On every (re)connection the cloud's copy is fetched and combined with
+       this device's BEFORE anything is written. Writing first, which is what a
+       queued offline save would do, replaces what other devices did meanwhile. */
+    firebase.database().ref('.info/connected').on('value',s=>{
+      if(s.val()!==true){ cloudLive=false; cloudSay('offline'); return; }
+      cloudSay('live');
+      cloudRef.get().then(x=>{
+        onCloud(x.val()); cloudLive=true; synced=true;
+        if(cloudDirty) cloudPush();
+        dailyBackup();                              // now that this device and the cloud agree
+      }).catch(e=>{ cloudSay('error'); log('sync','could not read the cloud: '+(e&&e.message||e)); });
+    });
+    cloudRef.on('value',s=>{ if(cloudLive) onCloud(s.val()); },
+      err=>{ cloudSay('error'); log('sync','cloud read failed: '+(err&&err.message||err)); });
+  }catch(e){ cloudSay('error'); log('sync','could not start: '+(e&&e.message||e)); }
+}
+function onCloud(d){
+  if(!d){ cloudLive=true; cloudDirty=true; cloudPush(); return; }   // empty cloud: this device's copy is the first
+  if((d.rev||0)===cloudSeen&&!cloudDirty) return;                    // our own write coming back
+  const m=mergeSnaps(snap(),d);
+  cloudSeen=d.rev||0;
+  if(!m.gave&&!m.took){ rev=d.rev||rev; cloudDirty=false; return; }
+  applyState(m.state);
+  STORE.set(APP.key,JSON.stringify(snap()));
+  if(m.took){ log('cloud-in','took changes from another device'); draw(); flash('Updated from your other device.'); }
+  if(m.gave){ log('cloud-out','the cloud was missing changes made here; sent them'); cloudDirty=true; cloudLive=true; cloudPush(); }
+  else cloudDirty=false;
 }
 function cloudPush(){
-  if(!cloudRef) return;
+  if(STALE) return;
+  cloudDirty=true;
+  if(!cloudRef||!cloudLive) return;                 // not connected, or not yet caught up: it goes when we are
   clearTimeout(pushT);
   pushT=setTimeout(()=>{
-    const d=snap(); cloudSeen=d.rev; cloudSay('saving');
-    cloudRef.set(d).then(()=>cloudSay('live'))
-      .catch(e=>{ log('sync','WRITE FAILED: '+(e&&(e.code||e.message)||'?')); cloudSay('error'); console.warn('cloud write failed:',e&&e.message); });
-  },400);
+    if(!cloudLive) return;
+    const d=JSON.parse(JSON.stringify(snap()));     // exactly what would be stored
+    cloudSeen=d.rev; cloudDirty=false; cloudSay('saving');
+    cloudRef.set(d).then(()=>{ if(cloudState==='saving') cloudSay('live'); })
+      .catch(e=>{ cloudDirty=true; log('sync','WRITE FAILED: '+(e&&(e.code||e.message)||'?')); cloudSay('error'); });
+  },400);                                           // a burst of taps is one write
 }
 
 /* ---- settings ---- */
@@ -469,7 +722,7 @@ function show(id){ $('scrim').classList.add('on'); $(id).classList.add('on'); }
 function closeSheets(){ ['sheet-set'].forEach(i=>$(i).classList.remove('on')); $('scrim').classList.remove('on'); }
 $('scrim').addEventListener('click',closeSheets);
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheets(); });
-$('gear').addEventListener('click',()=>{ drawLinks(); ghPaint(); wipeDisarm(); show('sheet-set'); });
+$('gear').addEventListener('click',()=>{ drawLinks(); ghPaint(); wipeDisarm(); $('backups').innerHTML=''; show('sheet-set'); });
 
 function download(name,text,type){
   const a=document.createElement('a');
@@ -485,19 +738,22 @@ $('imp').addEventListener('click',()=>$('imp-file').click());
 $('imp-file').addEventListener('change',e=>{
   const f=e.target.files[0]; if(!f) return;
   const r=new FileReader();
-  r.onload=()=>{ try{
-    if(!applyState(JSON.parse(r.result))) throw 0;
+  r.onload=async()=>{ try{
+    const d=JSON.parse(r.result);
+    await backupState('before-restore');
+    if(!adoptState(d)) throw 0;
     draw(); save(); closeSheets(); flash('Backup restored.');
   }catch(err){ flash('That file could not be read.'); } };
   r.readAsText(f); e.target.value='';
 });
+$('online-backups').addEventListener('click',openBackups);
 $('send-log').addEventListener('click',()=>sendLog(true,false));
 $('gh-save').addEventListener('click',async()=>{
   const t=$('gh-token').value.trim(); $('gh-token').value='';
   if(!t){ flash('Paste the token into the box first.'); return; }
-  ghTok=t; ghState='';
+  ghTok=t; ghState=''; ghMeta.fails=0; ghMeta.err='';
   try{ await STORE.set(GH_KEY,t); }catch(e){}
-  log('send-setup','token saved on this device'); ghPaint(); sendLog(true,false);
+  log('send-setup','token saved on this device'); ghPaint(); health(); sendLog(true,false); dailyBackup();
 });
 $('exp-log').addEventListener('click',()=>{
   if(!actlog.length){ flash('Nothing in the log yet.'); return; }
@@ -505,18 +761,20 @@ $('exp-log').addEventListener('click',()=>{
   flash('Log exported — '+actlog.length+' entries.');
 });
 $('clr-log').addEventListener('click',()=>{
-  logBase+=actlog.length; actlog=[]; flushLog();
+  logBase+=actlog.length; actlog=[]; flushLog();          // the numbers carry on, so the gap shows in the record
   drawLinks(); flash('Activity log cleared.');
 });
 
 let wipeArmed=false, wipeT;
 function wipeDisarm(){ wipeArmed=false; clearTimeout(wipeT);
   const b=$('wipe'); if(b){ b.classList.remove('arm'); b.textContent='Clear everything'; } }
-$('wipe').addEventListener('click',()=>{
+$('wipe').addEventListener('click',async()=>{
   if(!wipeArmed){ wipeArmed=true; const b=$('wipe');
     b.classList.add('arm'); b.textContent='Erase all data? Tap again';
     clearTimeout(wipeT); wipeT=setTimeout(wipeDisarm,5000); return; }
-  data={items:[]}; wipeDisarm(); draw(); save(); closeSheets(); log('wipe','all data cleared'); flash('Everything cleared.');
+  await backupState('before-wipe');
+  const empty={}; APP.lists.forEach(k=>{ empty[k]=[]; });
+  adoptState(empty); wipeDisarm(); draw(); save(); closeSheets(); log('wipe','all data cleared'); flash('Everything cleared.');
 });
 
 if('serviceWorker' in navigator){
